@@ -65,20 +65,19 @@ contract BridgeCore is CCIPReceiver {
     IRouterClient private s_router;
     LinkTokenInterface private s_linkToken;
 
-    event SelfDeposit(
-        uint256 uniqueKey,
-        string dType,
-        uint256 destinationChain,
+    event SuccessfulDeposit(
+        uint256 indexed uniqueKey,
         uint256 commitment,
         uint256 root,
         uint256[10] hashPairings,
         uint8[10] pairDirection
     );
 
-    event CrossChainDeposit(
-        uint256 uniqueKey,
+    event InitiateDeposit(
+        uint256 indexed uniqueKey,
         string dType,
-        uint256 destinationChain
+        uint256 destinationChain,
+        uint256 commitment
     );
     event Withdrawal(address to, uint256 nullifierHash);
 
@@ -113,7 +112,7 @@ contract BridgeCore is CCIPReceiver {
         // emit Deposit(block.timestamp, _destChain, _commitment);
     }
 
-    function _selfDeposit(uint256 _commitment)
+    function _selfDeposit(uint256 _key, uint256 _commitment)
         public
         returns (
             uint256,
@@ -136,6 +135,7 @@ contract BridgeCore is CCIPReceiver {
         uint256 right;
         uint256[2] memory ins;
         uint256 _tempCommitment = _commitment;
+        uint256 tempKey = _key;
         for (uint8 i = 0; i < treeLevel; i++) {
             if (currentIdx % 2 == 0) {
                 left = currentHash;
@@ -158,12 +158,20 @@ contract BridgeCore is CCIPReceiver {
             currentHash = h;
             currentIdx = currentIdx / 2;
         }
-
+        uint256 tempCommitment = _commitment;
         newRoot = currentHash;
         roots[newRoot] = true;
         nextLeafIdx += 1;
 
-        commitments[_commitment] = true;
+        commitments[tempCommitment] = true;
+       
+        emit SuccessfulDeposit(
+            tempKey,
+            tempCommitment,
+            newRoot,
+            hashPairings,
+            hashDirections
+        );
         return (newRoot, hashPairings, hashDirections);
     }
 
@@ -211,30 +219,21 @@ contract BridgeCore is CCIPReceiver {
             funcall = 1;
             _dType = "SELF";
 
-            (root, hashPairings, pairDirection) = _selfDeposit(_commitment);
-            emit SelfDeposit(
-                block.timestamp,
-                _dType,
-                _destChain,
-                _commitment,
-                root,
-                hashPairings,
-                pairDirection
-            );
+            (root, hashPairings, pairDirection) = _selfDeposit(block.timestamp, _commitment);
         }
         // deposit came from a different contract via ccip
         if (_viaCCIP) {
             funcall = 2;
             _dType = "CCIP";
             _ccipDeposit(_commitment, _srcChain, _destChain);
-            emit CrossChainDeposit(block.timestamp, _dType, _destChain);
+            emit InitiateDeposit(block.timestamp, _dType, _destChain, _commitment);
         }
         // depost came from a different chain via relayer
         if (_viaRelayer) {
             funcall = 3;
             _dType = "RELAY";
             _relayerDeposit(_commitment, _destChain);
-            emit CrossChainDeposit(block.timestamp, _dType, _destChain);
+            emit InitiateDeposit(block.timestamp, _dType, _destChain, _commitment);
         }
     }
 
