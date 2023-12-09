@@ -19,10 +19,19 @@ interface IVerifier {
 }
 
 contract BridgeCore is CCIPReceiver {
+    // struct to store deposit details
+    // // emit Deposit(newRoot, hashPairings, hashDirections, _destChain, 0);
+    struct depositStruct {
+        uint256 rrotHash;
+        uint256[10] hashPairings;
+        uint256[10] hashDirections;
+    }
     // Mapping relaTED TO  contracts
     mapping(uint64 => address) public chainIdToContractMapping;
     // Mapping CCIP ChainId to Contract
     mapping(uint64 => address) public ccipChainIdToContractMapping;
+    // Mapping to store address to deposit details
+    mapping(address => depositStruct) public despositMapping;
     uint64 chainId;
     uint256 ccipChainId;
     // verifier address
@@ -56,7 +65,21 @@ contract BridgeCore is CCIPReceiver {
     IRouterClient private s_router;
     LinkTokenInterface private s_linkToken;
 
-    event Deposit(uint256 destinationChain, uint256 commitment);
+    event SelfDeposit(
+        uint256 uniqueKey,
+        string dType,
+        uint256 destinationChain,
+        uint256 commitment,
+        uint256 root,
+        uint256[10] hashPairings,
+        uint8[10] pairDirection
+    );
+
+    event CrossChainDeposit(
+        uint256 uniqueKey,
+        string dType,
+        uint256 destinationChain
+    );
     event Withdrawal(address to, uint256 nullifierHash);
 
     constructor(
@@ -87,10 +110,17 @@ contract BridgeCore is CCIPReceiver {
     }
 
     function _relayerDeposit(uint256 _commitment, uint64 _destChain) public {
-        emit Deposit(_destChain, _commitment);
+        // emit Deposit(block.timestamp, _destChain, _commitment);
     }
 
-    function _selfDeposit(uint256 _commitment) public {
+    function _selfDeposit(uint256 _commitment)
+        public
+        returns (
+            uint256,
+            uint256[10] memory,
+            uint8[10] memory
+        )
+    {
         // require(msg.value == denomination, "incorrect-amount");
         require(!commitments[_commitment], "existing-commitment");
         require(nextLeafIdx < 2**treeLevel, "tree-full");
@@ -105,7 +135,7 @@ contract BridgeCore is CCIPReceiver {
         uint256 left;
         uint256 right;
         uint256[2] memory ins;
-
+        uint256 _tempCommitment = _commitment;
         for (uint8 i = 0; i < treeLevel; i++) {
             if (currentIdx % 2 == 0) {
                 left = currentHash;
@@ -123,7 +153,7 @@ contract BridgeCore is CCIPReceiver {
             ins[0] = left;
             ins[1] = right;
 
-            uint256 h = hasher.MiMC5Sponge{gas: 150000}(ins, _commitment);
+            uint256 h = hasher.MiMC5Sponge{gas: 150000}(ins, _tempCommitment);
 
             currentHash = h;
             currentIdx = currentIdx / 2;
@@ -134,7 +164,7 @@ contract BridgeCore is CCIPReceiver {
         nextLeafIdx += 1;
 
         commitments[_commitment] = true;
-        // emit Deposit(newRoot, hashPairings, hashDirections, _destChain, 0);
+        return (newRoot, hashPairings, hashDirections);
     }
 
     function _ccipDeposit(
@@ -146,21 +176,16 @@ contract BridgeCore is CCIPReceiver {
             receiver: abi.encode(ccipChainIdToContractMapping[_destChainId]),
             data: abi.encodeWithSignature("_selfDeposit(uint256)", _commitment),
             tokenAmounts: new Client.EVMTokenAmount[](0),
-            extraArgs: "",
+            extraArgs: Client._argsToBytes(
+                // Additional arguments, setting gas limit and non-strict sequencing mode
+                Client.EVMExtraArgsV1({gasLimit: 1000_000, strict: false})
+            ),
             feeToken: address(0)
         });
 
         uint256 fee = IRouterClient(i_router).getFee(_destChainId, message);
 
         bytes32 messageId;
-
-        // if (payFeesIn == PayFeesIn.LINK) {
-        //     // LinkTokenInterface(i_link).approve(i_router, fee);
-        //     messageId = IRouterClient(i_router).ccipSend(
-        //         destinationChainSelector,
-        //         message
-        //     );
-        // } else {
         messageId = IRouterClient(i_router).ccipSend{value: fee}(
             _destChainId,
             message
@@ -177,20 +202,39 @@ contract BridgeCore is CCIPReceiver {
         bool _viaCCIP,
         bool _viaRelayer
     ) external payable {
+        string memory _dType;
+        uint256 root;
+        uint256[10] memory hashPairings;
+        uint8[10] memory pairDirection;
         // deposits and withdrawl from same contract
         if (_self) {
             funcall = 1;
-            _selfDeposit(_commitment);
+            _dType = "SELF";
+
+            (root, hashPairings, pairDirection) = _selfDeposit(_commitment);
+            emit SelfDeposit(
+                block.timestamp,
+                _dType,
+                _destChain,
+                _commitment,
+                root,
+                hashPairings,
+                pairDirection
+            );
         }
         // deposit came from a different contract via ccip
         if (_viaCCIP) {
             funcall = 2;
+            _dType = "CCIP";
             _ccipDeposit(_commitment, _srcChain, _destChain);
+            emit CrossChainDeposit(block.timestamp, _dType, _destChain);
         }
         // depost came from a different chain via relayer
         if (_viaRelayer) {
             funcall = 3;
+            _dType = "RELAY";
             _relayerDeposit(_commitment, _destChain);
+            emit CrossChainDeposit(block.timestamp, _dType, _destChain);
         }
     }
 
@@ -227,10 +271,12 @@ contract BridgeCore is CCIPReceiver {
         emit Withdrawal(msg.sender, _nullifierHash);
     }
 
-    function _ccipReceive(Client.Any2EVMMessage memory any2EvmMessage)
+    function _ccipReceive(Client.Any2EVMMessage memory message)
         internal
         override
     {
+        address(this).call(message.data);
+
         // s_lastReceivedMessageId = any2EvmMessage.messageId; // fetch the messageId
         // s_lastReceivedText = abi.decode(any2EvmMessage.data, (string)); // abi-decoding of the sent text
         // emit MessageReceived(
