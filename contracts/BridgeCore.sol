@@ -7,6 +7,7 @@ import {Client} from "@chainlink/contracts-ccip/src/v0.8/ccip/libraries/Client.s
 import {CCIPReceiver} from "@chainlink/contracts-ccip/src/v0.8/ccip/applications/CCIPReceiver.sol";
 import {IRouterClient} from "@chainlink/contracts-ccip/src/v0.8/ccip/interfaces/IRouterClient.sol";
 import {LinkTokenInterface} from "@chainlink/contracts/src/v0.8/shared/interfaces/LinkTokenInterface.sol";
+import "https://github.com/ernestognw/openzeppelin-contracts/blob/lib-869-bump-all-solidity-pragmas/contracts/token/ERC20/IERC20.sol";
 
 // Interface for SNAKR verifier contract
 interface IVerifier {
@@ -38,6 +39,8 @@ contract BridgeCore is CCIPReceiver {
     address verifier;
     // mimic sponge hash generator contract address
     Hasher hasher;
+    // ERC20 token
+    address tokenAddress;
     // max allowed tree level. For now -> 10
     uint8 public treeLevel = 10;
     uint256 public denomination = 0.1 ether;
@@ -88,7 +91,8 @@ contract BridgeCore is CCIPReceiver {
         uint64 _ccipChainId,
         address _send_router,
         address _receive_router,
-        address _link
+        address _link,
+        address _tokenAddress
     ) CCIPReceiver(_receive_router) {
         hasher = Hasher(_hasher);
         verifier = _verifier;
@@ -96,6 +100,7 @@ contract BridgeCore is CCIPReceiver {
         ccipChainId = _ccipChainId;
         s_router = IRouterClient(_send_router);
         s_linkToken = LinkTokenInterface(_link);
+        tokenAddress = _tokenAddress;
     }
 
     receive() external payable {}
@@ -209,7 +214,7 @@ contract BridgeCore is CCIPReceiver {
         bool _self,
         bool _viaCCIP,
         bool _viaRelayer
-    ) external payable {
+    ) external {
         string memory _dType;
         uint256 root;
         uint256[10] memory hashPairings;
@@ -235,6 +240,7 @@ contract BridgeCore is CCIPReceiver {
             _relayerDeposit(_commitment, _destChain);
             emit InitiateDeposit(block.timestamp, _dType, _destChain, _commitment);
         }
+        IERC20(tokenAddress).transferFrom(msg.sender, address(this), denomination);
     }
 
     function withdraw(
@@ -261,12 +267,12 @@ contract BridgeCore is CCIPReceiver {
         require(verifyOK, "invalid-proof");
 
         nullifierHashes[_nullifierHash] = true;
-        address payable target = payable(msg.sender);
+        // address payable target = payable(msg.sender);
 
-        (bool ok, ) = target.call{value: denomination}("");
+        // (bool ok, ) = target.call{value: denomination}("");
 
-        require(ok, "payment-failed");
-
+        // require(ok, "payment-failed");
+        IERC20(tokenAddress).transfer(msg.sender, denomination);
         emit Withdrawal(msg.sender, _nullifierHash);
     }
 
